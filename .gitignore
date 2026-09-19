@@ -22,8 +22,3 @@ scratch/
 tmp/
 
 .vercel
-
-# Editor-assistant rule files some tools generate in the project root.
-AGENTS.md
-CLAUDE.md
-.cursor/
