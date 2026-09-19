@@ -52,19 +52,21 @@ Each planted case hides its entire edge inside high-VIX periods. Each null case 
 
 ## Failing cases
 
-- `no-edge/skewed/n40/b` — False positive: graded strong on a record with no edge.
-- `no-edge/skewed/n60/b` — False positive: graded strong on a record with no edge.
-- `edge/normal/sr10/n400` — Missed a provable edge: graded weak.
-- `edge/skewed/sr25/n120` — Missed a provable edge: graded indistinguishable_from_luck.
-- `edge/skewed/sr15/n250` — Missed a provable edge: graded indistinguishable_from_luck.
-- `short-edge/normal/sr30/n30` — Over-claimed: graded supported on a sample shorter than the required track record.
-- `short-edge/normal/sr10/n80` — Over-claimed: graded strong on a sample shorter than the required track record.
-- `short-edge/skewed/sr30/n30` — Over-claimed: graded strong on a sample shorter than the required track record.
-- `short-edge/skewed/sr25/n25` — Over-claimed: graded supported on a sample shorter than the required track record.
-- `short-edge/skewed/sr10/n80` — Over-claimed: graded supported on a sample shorter than the required track record.
-- `regime/planted/normal/n180` — Missed the planted regime effect (p = 0.0725).
-- `regime/planted/skewed/n180` — Missed the planted regime effect (p = 0.2294).
-- `regime/planted/fat/n300` — Missed the planted regime effect (p = 0.0915).
+Each line carries the sample skewness the engine measured next to the true skewness of the distribution the record was drawn from. On short windows those two numbers can be very far apart, and the Probabilistic Sharpe Ratio corrects for non-normality using the sample one.
+
+- `no-edge/skewed/n40/b` — False positive: graded strong on a record with no edge. True Sharpe 0.000, observed 0.488 over 40 periods; sample skewness -0.29 against a true -1.96.
+- `no-edge/skewed/n60/b` — False positive: graded strong on a record with no edge. True Sharpe 0.000, observed 0.383 over 60 periods; sample skewness -0.72 against a true -1.96.
+- `edge/normal/sr10/n400` — Missed a provable edge: graded weak. True Sharpe 0.100, observed 0.079 over 400 periods; sample skewness -0.12 against a true 0.00.
+- `edge/skewed/sr25/n120` — Missed a provable edge: graded indistinguishable_from_luck. True Sharpe 0.250, observed 0.141 over 120 periods; sample skewness -3.41 against a true -1.96.
+- `edge/skewed/sr15/n250` — Missed a provable edge: graded indistinguishable_from_luck. True Sharpe 0.150, observed 0.067 over 250 periods; sample skewness -1.88 against a true -1.96.
+- `short-edge/normal/sr30/n30` — Over-claimed: graded supported on a sample shorter than the required track record. True Sharpe 0.300, observed 0.386 over 30 periods; sample skewness 0.17 against a true 0.00.
+- `short-edge/normal/sr10/n80` — Over-claimed: graded strong on a sample shorter than the required track record. True Sharpe 0.100, observed 0.323 over 80 periods; sample skewness 0.09 against a true 0.00.
+- `short-edge/skewed/sr30/n30` — Over-claimed: graded strong on a sample shorter than the required track record. True Sharpe 0.300, observed 0.916 over 30 periods; sample skewness -1.24 against a true -1.96.
+- `short-edge/skewed/sr25/n25` — Over-claimed: graded supported on a sample shorter than the required track record. True Sharpe 0.250, observed 0.470 over 25 periods; sample skewness -0.92 against a true -1.96.
+- `short-edge/skewed/sr10/n80` — Over-claimed: graded supported on a sample shorter than the required track record. True Sharpe 0.100, observed 0.326 over 80 periods; sample skewness -1.94 against a true -1.96.
+- `regime/planted/normal/n180` — Missed the planted regime effect (p = 0.0695). True Sharpe 0.172, observed 0.076 over 180 periods; sample skewness -0.27 against a true 0.00.
+- `regime/planted/skewed/n180` — Missed the planted regime effect (p = 0.2749). True Sharpe 0.172, observed 0.112 over 180 periods; sample skewness -1.98 against a true -1.96.
+- `regime/planted/fat/n300` — Missed the planted regime effect (p = 0.0540). True Sharpe 0.123, observed 0.069 over 300 periods; sample skewness 0.29 against a true 0.00.
 
 ## Suite composition
 

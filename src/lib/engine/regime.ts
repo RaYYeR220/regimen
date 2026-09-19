@@ -15,11 +15,11 @@ import type { RegimeSeries, TrackRecord } from '@/lib/sources/types';
  *
  *  1. **Point-in-time joins only.** Each factor is read with an explicit `as_of`, so
  *     nothing in a bucket could have been known only after the fact.
- *  2. **A permutation test on the spread.** Slice a return series eight ways and the
- *     best-looking bucket will look good by chance alone. The observed best-worst
- *     Sharpe spread is therefore compared against the spread obtained by randomly
- *     reshuffling the regime labels many times. Without that p-value a regime map is
- *     just a machine for finding flattering subsets.
+ *  2. **A permutation test.** Slice a return series eight ways and the best-looking
+ *     bucket will look good by chance alone, so the observed between-bucket dispersion
+ *     is compared against the dispersion obtained by randomly reshuffling the regime
+ *     labels many times. Without that p-value a regime map is just a machine for
+ *     finding flattering subsets.
  */
 
 export type BucketingMethod = 'fixed_edges' | 'terciles';
@@ -86,7 +86,11 @@ export interface PermutationResult {
   readonly pValue: number;
   readonly resamples: number;
   readonly seed: number;
-  readonly observedSpread: number;
+  /** The statistic the p-value is computed from. */
+  readonly statistic: 'weighted_between_bucket_variance';
+  readonly observedStatistic: number;
+  /** Best-minus-worst Sharpe, reported because it reads well — not what is tested. */
+  readonly observedSpread: number | null;
   readonly interpretation: string;
 }
 
@@ -102,6 +106,7 @@ export interface FactorReport {
   readonly best: { readonly label: string; readonly sharpe: number } | null;
   readonly worst: { readonly label: string; readonly sharpe: number } | null;
   readonly spread: number | null;
+  readonly dispersion: number | null;
   readonly permutation: PermutationResult | null;
   readonly warnings: readonly string[];
 }
@@ -161,6 +166,36 @@ function spreadOf(buckets: readonly BucketStats[]): number | null {
   const sharpes = buckets.filter((bucket) => bucket.sufficient && bucket.sharpe !== null).map((b) => b.sharpe as number);
   if (sharpes.length < 2) return null;
   return Math.max(...sharpes) - Math.min(...sharpes);
+}
+
+/**
+ * Between-bucket dispersion: the observation-weighted variance of the bucket Sharpe
+ * ratios around their weighted mean.
+ *
+ * This, and not the best-minus-worst spread, is what the permutation test runs on.
+ * A range statistic only ever sees two buckets, ignores how many observations stand
+ * behind them, and grows with the number of buckets purely by chance — measured
+ * against a planted regime effect it could not separate signal from the null at all.
+ * A weighted variance uses every bucket, discounts the thin ones, and is the standard
+ * between-group dispersion measure. The spread is still reported, because it is what a
+ * reader intuitively wants to see; it just is not what the p-value is computed from.
+ */
+function dispersionOf(buckets: readonly BucketStats[]): number | null {
+  const usable = buckets.filter((bucket) => bucket.sufficient && bucket.sharpe !== null);
+  if (usable.length < 2) return null;
+
+  const totalCount = usable.reduce((total, bucket) => total + bucket.count, 0);
+  if (totalCount === 0) return null;
+
+  const weightedMean =
+    usable.reduce((total, bucket) => total + bucket.count * (bucket.sharpe as number), 0) / totalCount;
+
+  return (
+    usable.reduce((total, bucket) => {
+      const deviation = (bucket.sharpe as number) - weightedMean;
+      return total + bucket.count * deviation * deviation;
+    }, 0) / totalCount
+  );
 }
 
 export function buildRegimeMap(
@@ -226,6 +261,7 @@ export function buildRegimeMap(
         best: null,
         worst: null,
         spread: null,
+        dispersion: null,
         permutation: null,
         warnings: [
           `Only ${values.length} period(s) carried a value for this factor, below the minimum of ${minSample}. No attribution is reported.`,
@@ -252,6 +288,7 @@ export function buildRegimeMap(
           best: null,
           worst: null,
           spread: null,
+          dispersion: null,
           permutation: null,
           warnings: ['This factor barely varied over the period, so splitting it would not describe anything.'],
         });
@@ -275,6 +312,7 @@ export function buildRegimeMap(
         best: null,
         worst: null,
         spread: null,
+        dispersion: null,
         permutation: null,
         warnings: [bucketed.message],
       });
@@ -301,6 +339,7 @@ export function buildRegimeMap(
         best: null,
         worst: null,
         spread: null,
+        dispersion: null,
         permutation: null,
         warnings: [stats.message],
       });
@@ -310,6 +349,7 @@ export function buildRegimeMap(
     const buckets = stats.value.buckets;
     const sufficient = buckets.filter((bucket) => bucket.sufficient && bucket.sharpe !== null);
     const observedSpread = spreadOf(buckets);
+    const observedDispersion = dispersionOf(buckets);
 
     if (sufficient.length < buckets.length) {
       factorWarnings.push(
@@ -328,28 +368,30 @@ export function buildRegimeMap(
     }
 
     let permutation: PermutationResult | null = null;
-    if (observedSpread !== null && sufficient.length >= 2) {
-      const rng = mulberry32(seed + hashKey(key));
+    if (observedDispersion !== null && sufficient.length >= 2) {
+      const factorSeed = seed + hashKey(key);
+      const rng = mulberry32(factorSeed);
       let atLeastAsExtreme = 0;
       for (let i = 0; i < permutationResamples; i += 1) {
         const permutedLabels = shuffled(bucketed.value.labels, rng);
         const nullStats = conditionalStats({ returns: alignedReturns, labels: permutedLabels, minSample });
         if (!nullStats.ok) continue;
-        const nullSpread = spreadOf(nullStats.value.buckets);
-        if (nullSpread !== null && nullSpread >= observedSpread) atLeastAsExtreme += 1;
+        const nullDispersion = dispersionOf(nullStats.value.buckets);
+        if (nullDispersion !== null && nullDispersion >= observedDispersion) atLeastAsExtreme += 1;
       }
-      // Add-one smoothing: a p-value of exactly zero is not something a finite
-      // permutation set can establish.
+      // Add-one smoothing: a finite permutation set cannot establish a p-value of zero.
       const pValue = (atLeastAsExtreme + 1) / (permutationResamples + 1);
       permutation = {
         pValue,
         resamples: permutationResamples,
-        seed: seed + hashKey(key),
+        seed: factorSeed,
+        statistic: 'weighted_between_bucket_variance',
+        observedStatistic: observedDispersion,
         observedSpread,
         interpretation:
           pValue <= 0.05
-            ? 'The spread across these buckets is larger than random relabelling produces, so the split describes something real about the strategy.'
-            : 'Randomly reshuffling the regime labels produces a spread this large often enough that this split is not evidence of a regime effect.',
+            ? 'Performance differs across these buckets by more than random relabelling produces, so the split describes something real about the strategy.'
+            : 'Randomly reshuffling the regime labels produces differences this large often enough that this split is not evidence of a regime effect.',
       };
     }
 
@@ -365,6 +407,7 @@ export function buildRegimeMap(
       best,
       worst,
       spread: observedSpread,
+      dispersion: observedDispersion,
       permutation,
       warnings: factorWarnings,
     });

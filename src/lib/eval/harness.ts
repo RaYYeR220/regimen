@@ -94,6 +94,18 @@ export interface CaseOutcome {
   readonly periodsRequired: number | null;
   readonly observedTier: EvidenceTier;
   readonly observedSharpePerPeriod: number | null;
+  /**
+   * Sample skewness and NON-EXCESS kurtosis, as the engine measured them.
+   *
+   * Recorded next to the population values because the gap between them is the
+   * mechanism behind most of the interesting failures: the PSR correction for
+   * non-normality is driven by the SAMPLE third and fourth moments, and on a short
+   * window those are estimated from whichever tail events happened to show up.
+   */
+  readonly observedSkewness: number | null;
+  readonly observedKurtosis: number | null;
+  readonly populationSkewness: number;
+  readonly populationKurtosis: number;
   readonly probabilisticSharpe: number | null;
   /** `true` when the engine graded this `supported` or `strong`. */
   readonly claimed: boolean;
@@ -364,6 +376,10 @@ export function runEvaluation(options: EvaluationOptions = {}): EvaluationReport
       periodsRequired: generated.truth.periodsRequired,
       observedTier: report.evidence.tier,
       observedSharpePerPeriod: report.performance.sharpePerPeriod,
+      observedSkewness: report.performance.skewness,
+      observedKurtosis: report.performance.kurtosis,
+      populationSkewness: generated.truth.populationSkewness,
+      populationKurtosis: generated.truth.populationKurtosis,
       probabilisticSharpe: report.evidence.probabilisticSharpe,
       claimed: isClaim(report.evidence.tier),
       regimePValue,

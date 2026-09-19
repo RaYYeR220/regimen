@@ -91,6 +91,15 @@ export interface DegenerateSuiteCase {
 
 export type SuiteCase = SyntheticSuiteCase | DegenerateSuiteCase;
 
+/** VIX, because it is the one factor whose regime edges the engine publishes as fixed constants. */
+export const REGIME_FACTOR = 'vix';
+
+/** Per-period volatility per shape. Fixed, and irrelevant to every Sharpe in the suite. */
+const VOL_NORMAL = 0.01;
+const VOL_SKEWED = 0.014;
+const VOL_FAT = 0.008;
+const VOL_REGIME = 0.012;
+
 // --- Private builders. Seeds are passed in literally at every call site. ------
 
 function noEdgeCase(
@@ -155,15 +164,6 @@ function regimeCase(
 function degenerateCase(id: string, degenerate: DegenerateKind, seed: number): DegenerateSuiteCase {
   return { kind: 'degenerate', id, expectation: 'degenerate', degenerate, seed };
 }
-
-/** VIX, because it is the one factor whose regime edges the engine publishes as fixed constants. */
-export const REGIME_FACTOR = 'vix';
-
-/** Per-period volatility per shape. Fixed, and irrelevant to every Sharpe in the suite. */
-const VOL_NORMAL = 0.01;
-const VOL_SKEWED = 0.014;
-const VOL_FAT = 0.008;
-const VOL_REGIME = 0.012;
 
 // --- Group 1: true no-edge. The false-positive traps. ------------------------
 

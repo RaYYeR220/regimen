@@ -47,6 +47,13 @@ export const EVIDENCE_THRESHOLDS = {
   weak: 0.9,
   supported: 0.95,
   strong: 0.99,
+  /**
+   * Below this many returns the sample skewness and kurtosis are too noisy for the
+   * non-normality correction to mean much. Kurtosis in particular is a fourth-moment
+   * estimate and converges slowly. The analysis still runs — it is flagged, not
+   * suppressed, because suppressing it would leave the caller with no number at all.
+   */
+  reliableShapeMoments: 100,
 } as const;
 
 export type EvidenceTier =
@@ -93,6 +100,12 @@ export interface EvidenceSummary {
   readonly periodsShortOfSignificance: number | null;
   readonly deflatedSharpe: number | null;
   readonly deflatedSharpeNote: string;
+  /**
+   * Whether the sample is long enough for the skewness and kurtosis corrections to
+   * carry information. Below the threshold they are estimated from too few points to
+   * be trusted, which is a known blind spot rather than a detail.
+   */
+  readonly shapeCorrectionReliable: boolean;
   readonly sharpeConfidenceInterval: { readonly lower: number; readonly upper: number; readonly level: number } | null;
   readonly bootstrap: { readonly resamples: number; readonly seed: number; readonly blockMeanLength: number } | null;
   readonly rationale: readonly string[];
@@ -347,6 +360,7 @@ function buildEvidence(args: EvidenceArgs): EvidenceSummary {
       periodsShortOfSignificance: null,
       deflatedSharpe: null,
       deflatedSharpeNote: 'Not computed: the sample is too short for any significance statement.',
+      shapeCorrectionReliable: false,
       sharpeConfidenceInterval: null,
       bootstrap: null,
       rationale: [
@@ -368,11 +382,14 @@ function buildEvidence(args: EvidenceArgs): EvidenceSummary {
       periodsShortOfSignificance: null,
       deflatedSharpe: null,
       deflatedSharpeNote: 'Not computed: the Sharpe ratio it would deflate does not exist.',
+      shapeCorrectionReliable: false,
       sharpeConfidenceInterval: null,
       bootstrap: null,
       rationale: ['Every return is identical, so the denominator of the Sharpe ratio is zero.'],
     };
   }
+
+  const shapeCorrectionReliable = n >= EVIDENCE_THRESHOLDS.reliableShapeMoments;
 
   const psr = probabilisticSharpeRatio({
     sharpe: sharpePerPeriod,
@@ -431,6 +448,12 @@ function buildEvidence(args: EvidenceArgs): EvidenceSummary {
     rationale.push(`The Probabilistic Sharpe Ratio is undefined here: ${psr.message}`);
   }
 
+  if (!shapeCorrectionReliable) {
+    rationale.push(
+      `This confidence is corrected for the sample's skewness and kurtosis, but with only ${n} returns those moments are themselves poorly estimated — a strategy whose tail risk has simply not arrived yet will look well-behaved here. Treat the figure as an upper bound on how much is really known.`,
+    );
+  }
+
   if (ci.ok) {
     rationale.push(
       `A stationary bootstrap over ${ci.value.resamples} resamples (mean block ${blockMeanLength}) puts the ${(confidence * 100).toFixed(0)}% interval for the per-period Sharpe at [${ci.value.lower.toFixed(4)}, ${ci.value.upper.toFixed(4)}].`,
@@ -467,6 +490,7 @@ function buildEvidence(args: EvidenceArgs): EvidenceSummary {
     periodsShortOfSignificance: periodsShort,
     deflatedSharpe: deflated,
     deflatedSharpeNote: deflatedNote,
+    shapeCorrectionReliable,
     sharpeConfidenceInterval: ci.ok ? { lower: ci.value.lower, upper: ci.value.upper, level: confidence } : null,
     bootstrap: ci.ok ? { resamples: ci.value.resamples, seed: args.seed, blockMeanLength } : null,
     rationale,

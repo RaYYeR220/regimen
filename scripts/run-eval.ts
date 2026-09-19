@@ -185,7 +185,15 @@ function renderMarkdown(report: EvaluationReport): string {
   if (failedCases.length > 0) {
     lines.push('## Failing cases');
     lines.push('');
-    for (const outcome of failedCases) lines.push(`- \`${outcome.id}\` — ${outcome.note}`);
+    lines.push(
+      'Each line carries the sample skewness the engine measured next to the true skewness of the distribution the record was drawn from. On short windows those two numbers can be very far apart, and the Probabilistic Sharpe Ratio corrects for non-normality using the sample one.',
+    );
+    lines.push('');
+    for (const outcome of failedCases) {
+      lines.push(
+        `- \`${outcome.id}\` — ${outcome.note} True Sharpe ${outcome.trueSharpePerPeriod.toFixed(3)}, observed ${formatNumber(outcome.observedSharpePerPeriod, 3)} over ${outcome.periods} periods; sample skewness ${formatNumber(outcome.observedSkewness, 2)} against a true ${outcome.populationSkewness.toFixed(2)}.`,
+      );
+    }
     lines.push('');
   }
 
