@@ -20,3 +20,5 @@ pnpm-debug.log*
 # local scratch, never published
 scratch/
 tmp/
+
+.vercel
