@@ -1,12 +1,13 @@
-import { McpServer } from '@modelcontextprotocol/server';
+import { McpServer, ResourceTemplate } from '@modelcontextprotocol/server';
 import * as z from 'zod';
 import { RegimenError, toRegimenError } from '@/lib/errors';
-import { buildRegimeMap } from '@/lib/engine/regime';
+import { FACTOR_BUCKETING, buildRegimeMap } from '@/lib/engine/regime';
 import { datesOf, resolveSource, type SourceSelector } from '@/lib/engine/resolve';
 import { runSelfAttack } from '@/lib/engine/self-attack';
-import { analyseSignificance } from '@/lib/engine/significance';
+import { EVIDENCE_THRESHOLDS, analyseSignificance } from '@/lib/engine/significance';
 import { REGIME_FACTOR_KEYS } from '@/lib/sources/nexus/adapter';
 import { inlineTrackRecordSchema } from '@/lib/sources/inline/adapter';
+import { METHODOLOGY_MARKDOWN } from '@/lib/methodology';
 import { FACTOR_CATALOGUE } from './factors';
 
 /**
@@ -382,5 +383,150 @@ export function buildServer(deps: ServerDeps): McpServer {
     },
   );
 
+  registerResources(server);
+  registerPrompts(server);
+
   return server;
+}
+
+/**
+ * Resources carry the things an agent should read rather than infer: the methodology
+ * behind the numbers, the exact grading thresholds, and the factor catalogue. All are
+ * static and identical for every caller, so they are marked publicly cacheable with a
+ * long TTL — under the 2026-07-28 revision that hint is what lets a client stop
+ * refetching them on every turn.
+ */
+function registerResources(server: McpServer): void {
+  const publicCache = { ttlMs: 86_400_000, cacheScope: 'public' as const };
+
+  server.registerResource(
+    'methodology',
+    'regimen://methodology',
+    {
+      title: 'How Regimen decides',
+      description:
+        'The statistics behind every verdict: the Probabilistic and Deflated Sharpe Ratios, Minimum Track Record Length, the bootstrap, the regime permutation test, the published evidence tiers, and the explicit limits of what this service does. Read this before explaining a result to a user.',
+      mimeType: 'text/markdown',
+      cacheHint: publicCache,
+    },
+    (uri) => ({
+      contents: [{ uri: uri.href, mimeType: 'text/markdown', text: METHODOLOGY_MARKDOWN }],
+    }),
+  );
+
+  server.registerResource(
+    'evidence-tiers',
+    'regimen://evidence-tiers',
+    {
+      title: 'Evidence tier thresholds',
+      description:
+        'The exact numeric thresholds that map a confidence level to a verdict. Published so a caller can see the grading is a fixed function of the statistics rather than a judgement call.',
+      mimeType: 'application/json',
+      cacheHint: publicCache,
+    },
+    (uri) => ({
+      contents: [
+        {
+          uri: uri.href,
+          mimeType: 'application/json',
+          text: JSON.stringify(
+            {
+              thresholds: EVIDENCE_THRESHOLDS,
+              tiers: [
+                { tier: 'insufficient_evidence', condition: 'fewer than 20 usable returns, or no dispersion' },
+                { tier: 'indistinguishable_from_luck', condition: 'governing confidence below 90%' },
+                { tier: 'weak', condition: '90-95%, or a bootstrap interval that still contains zero' },
+                { tier: 'supported', condition: 'at least 95% and the bootstrap lower bound clears zero' },
+                { tier: 'strong', condition: 'at least 99%, interval clears zero, record at least MinTRL long' },
+              ],
+              governing:
+                'The Deflated Sharpe Ratio when trial Sharpes were supplied, otherwise the Probabilistic Sharpe Ratio.',
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    }),
+  );
+
+  server.registerResource(
+    'factor',
+    new ResourceTemplate('regimen://factor/{key}', {
+      list: () => ({
+        resources: REGIME_FACTOR_KEYS.map((key) => ({
+          uri: `regimen://factor/${key}`,
+          name: FACTOR_CATALOGUE[key].label,
+          mimeType: 'application/json',
+        })),
+      }),
+      // Argument completion for the factor key. Rarely implemented, and it is what
+      // lets a client offer the valid values instead of making the model guess them.
+      complete: {
+        key: (value: string) => REGIME_FACTOR_KEYS.filter((key) => key.startsWith(value)),
+      },
+    }),
+    {
+      title: 'Regime factor detail',
+      description:
+        'One market-condition factor: what it measures, its unit, how it is bucketed, and which upstream operation supplies it.',
+      mimeType: 'application/json',
+      cacheHint: publicCache,
+    },
+    (uri, variables) => {
+      const key = String(variables['key']);
+      const entry = (FACTOR_CATALOGUE as Record<string, (typeof FACTOR_CATALOGUE)[keyof typeof FACTOR_CATALOGUE]>)[key];
+      if (!entry) {
+        throw new RegimenError('not_found', `There is no regime factor called "${key}".`, {
+          details: { known: [...REGIME_FACTOR_KEYS] },
+        });
+      }
+      const bucketing = FACTOR_BUCKETING[key] ?? null;
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: 'application/json',
+            text: JSON.stringify({ key, ...entry, bucketing }, null, 2),
+          },
+        ],
+      };
+    },
+  );
+}
+
+function registerPrompts(server: McpServer): void {
+  server.registerPrompt(
+    'validate_strategy',
+    {
+      title: 'Validate a strategy end to end',
+      description:
+        'The full review a strategy deserves before anyone sizes on it: establish whether the edge is distinguishable from luck, check the engine against its own controls, then find out which market conditions the edge actually lives in.',
+      argsSchema: z.object({
+        source: z
+          .enum(['olaxbt-nexus', 'inline'])
+          .describe('Which track record to review: the connected Nexus strategy, or a curve you will paste.'),
+        symbol: z.string().optional().describe('For olaxbt-nexus, the market traded. Default BTC/USDT.'),
+      }),
+    },
+    ({ source, symbol }) => ({
+      messages: [
+        {
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: [
+              `Review the ${source === 'inline' ? 'equity curve I am about to give you' : `OlaXBT Nexus strategy${symbol ? ` trading ${symbol}` : ''}`} using Regimen, in this order:`,
+              '',
+              '1. Call regimen_evaluate_track_record. Lead with the verdict and the Probabilistic Sharpe Ratio, and state plainly how many more periods would be needed if the record is short of significance. Do not quote the annualised Sharpe on its own — it is the number that misleads.',
+              '2. Call regimen_self_attack. Report whether the mean-centred control passed. If it did not, stop and say the verdict cannot be trusted.',
+              '3. Call regimen_regime_map. For each factor, only treat a spread as real when its permutation p-value is at or below 0.05, and say so explicitly when it is not.',
+              '',
+              'Finish with one paragraph a trader can act on. If the evidence is thin, say that first rather than burying it.',
+            ].join('\n'),
+          },
+        },
+      ],
+    }),
+  );
 }

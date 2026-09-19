@@ -1,6 +1,6 @@
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { buildServer, type ServerDeps } from '@/lib/mcp/server';
-import { NEXUS_KEY_HEADER } from '@/lib/http';
+import { NEXUS_KEY_HEADER, originRejection } from '@/lib/http';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 300;
@@ -29,6 +29,9 @@ function depsFor(request: Request): ServerDeps {
 }
 
 async function serve(request: Request): Promise<Response> {
+  const rejected = originRejection(request);
+  if (rejected) return rejected;
+
   const deps = depsFor(request);
   const handler = createMcpHandler(() => buildServer(deps));
   try {

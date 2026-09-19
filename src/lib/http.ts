@@ -118,6 +118,9 @@ export function handler<T>(
     const startedAt = Date.now();
     let mode: ResponseMeta['mode'] = 'inline';
 
+    const rejected = originRejection(request);
+    if (rejected) return rejected;
+
     try {
       const data = await run(request, { requestId, setMode: (next) => (mode = next) });
       const meta: ResponseMeta = { requestId, commit: COMMIT, durationMs: Date.now() - startedAt, mode };
@@ -131,4 +134,56 @@ export function handler<T>(
       );
     }
   };
+}
+
+/**
+ * DNS-rebinding protection.
+ *
+ * A browser on an attacker's page can point a hostname at this service and issue
+ * cross-origin requests carrying whatever the victim's browser would attach. The
+ * MCP transport specification requires servers to validate `Origin` and refuse
+ * anything unrecognised, so that check lives here and is applied by every entry point.
+ *
+ * Non-browser clients — which is most MCP clients, and every `curl` a reviewer will
+ * run — send no `Origin` at all, and are allowed through. Only a PRESENT and
+ * unrecognised origin is refused.
+ */
+const ALLOWED_ORIGIN_HOSTS: ReadonlySet<string> = new Set([
+  'regimen-nu.vercel.app',
+  'regimen-rayyer220s-projects.vercel.app',
+  'localhost',
+  '127.0.0.1',
+]);
+
+export function originRejection(request: Request): Response | null {
+  const origin = request.headers.get('origin');
+  if (!origin) return null;
+
+  let host: string;
+  try {
+    host = new URL(origin).hostname;
+  } catch {
+    return forbidden('The Origin header is not a valid URL.');
+  }
+
+  // The deployment's own host is always acceptable, including preview URLs, so the
+  // check keeps working when Vercel assigns a new hostname.
+  const selfHost = (() => {
+    try {
+      return new URL(request.url).hostname;
+    } catch {
+      return null;
+    }
+  })();
+
+  if (host === selfHost || ALLOWED_ORIGIN_HOSTS.has(host)) return null;
+
+  return forbidden(`Requests from origin ${origin} are not accepted.`);
+}
+
+function forbidden(message: string): Response {
+  return jsonResponse(
+    { error: { code: 'invalid_input', message, retryable: false } },
+    { status: 403 },
+  );
 }
