@@ -13,6 +13,7 @@ the claim being made. That is the product, not a failure mode.
 - **Live API** — https://regimen-nu.vercel.app
 - **MCP endpoint** — `https://regimen-nu.vercel.app/mcp` (revision `2026-07-28`)
 - **OpenAPI** — https://regimen-nu.vercel.app/api/v1/openapi.json
+- **MCP Registry** — published as `io.github.RaYYeR220/regimen` ([listing](https://registry.modelcontextprotocol.io/v0/servers?search=regimen))
 - **Verify it yourself** — [`verification/README.md`](./verification/README.md) · **Claims ledger** — [`CLAIMS.md`](./CLAIMS.md) · **Real vs simulated** — [`MOCKS.md`](./MOCKS.md) · **Scorecard** — [`EVAL.md`](./EVAL.md)
 
 ---
@@ -112,11 +113,15 @@ agent rather than a human reading a stack trace.
 
 ### MCP
 
-Connect any MCP client to `https://regimen-nu.vercel.app/mcp`.
+Connect any MCP client to `https://regimen-nu.vercel.app/mcp` over Streamable HTTP. No
+authentication is needed for the `inline` source. For a client configured by file:
 
-```bash
-claude mcp add --transport http regimen https://regimen-nu.vercel.app/mcp
+```json
+{ "mcpServers": { "regimen": { "url": "https://regimen-nu.vercel.app/mcp" } } }
 ```
+
+To inspect it interactively: `npx @modelcontextprotocol/inspector` and point it at the
+same URL.
 
 **Tools** — `regimen_evaluate_track_record`, `regimen_regime_map`, `regimen_self_attack`,
 `regimen_describe_factors`. Each advertises an `outputSchema` and returns validated

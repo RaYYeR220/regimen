@@ -35,6 +35,7 @@ that grades other people's evidence has no business being vague about its own.
 | Every MCP tool advertises an output schema. | `VERIFIED-LIVE` | `tools/list` — each entry carries `outputSchema`, and calls return `structuredContent`. |
 | Requests from an unrecognised `Origin` are refused. | `VERIFIED-LIVE` | `curl -H 'Origin: https://evil.example' .../api/v1/status` returns 403. |
 | A reviewer can exercise the inline analyses with no credentials. | `VERIFIED-LIVE` | The `curl` commands in `verification/README.md` use no key. |
+| The server is listed in the official MCP Registry. | `VERIFIED-LIVE` | `curl https://registry.modelcontextprotocol.io/v0/servers?search=regimen` returns `io.github.RaYYeR220/regimen` at version 1.0.0, pointing at this deployment. |
 | Point-in-time market data carries no lookahead. | `REPRODUCIBLE` | Every upstream read passes an explicit `as_of` date; see `fetchRegimes` in `src/lib/sources/nexus/adapter.ts`. |
 
 ## Explicitly NOT claimed
