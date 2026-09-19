@@ -13,7 +13,7 @@ the claim being made. That is the product, not a failure mode.
 - **Live API** — https://regimen-nu.vercel.app
 - **MCP endpoint** — `https://regimen-nu.vercel.app/mcp` (revision `2026-07-28`)
 - **OpenAPI** — https://regimen-nu.vercel.app/api/v1/openapi.json
-- **Reviewer path** — [`JUDGES.md`](./JUDGES.md) · **Claims ledger** — [`CLAIMS.md`](./CLAIMS.md) · **Real vs simulated** — [`MOCKS.md`](./MOCKS.md)
+- **Verify it yourself** — [`verification/README.md`](./verification/README.md) · **Claims ledger** — [`CLAIMS.md`](./CLAIMS.md) · **Real vs simulated** — [`MOCKS.md`](./MOCKS.md) · **Scorecard** — [`EVAL.md`](./EVAL.md)
 
 ---
 
@@ -53,9 +53,10 @@ tried first. A stationary-bootstrap confidence interval that preserves serial de
 **2. Regime attribution.** Each period's return is joined to the market conditions that
 held on that UTC date — volatility, funding, open interest, positioning, sentiment, trend
 state — read point-in-time, so nothing in a bucket could only have been known afterwards.
-Every factor carries a **permutation test**: the observed best-to-worst spread is compared
-against spreads from randomly reshuffled labels, because slicing a return series eight ways
-guarantees a flattering subset. Without that p-value a regime map is a data-mining machine.
+Every factor carries a **permutation test**: the observed dispersion of performance across
+buckets is compared against the dispersion produced by randomly reshuffling the regime
+labels, because slicing a return series eight ways guarantees a flattering subset. Without
+that p-value a regime map is a data-mining machine.
 
 **3. Self-attack.** Every analysis can be run against controls whose answer is known in
 advance: the strategy's own returns with the mean removed (true Sharpe exactly zero, so a
