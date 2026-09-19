@@ -1,40 +1,34 @@
-import { McpServer, createMcpHandler } from '@modelcontextprotocol/server';
+import { McpServer } from '@modelcontextprotocol/server';
 import * as z from 'zod';
+import { RegimenError, toRegimenError } from '@/lib/errors';
+import { buildRegimeMap } from '@/lib/engine/regime';
+import { datesOf, resolveSource, type SourceSelector } from '@/lib/engine/resolve';
+import { runSelfAttack } from '@/lib/engine/self-attack';
+import { analyseSignificance } from '@/lib/engine/significance';
 import { REGIME_FACTOR_KEYS } from '@/lib/sources/nexus/adapter';
-import { toRegimenError } from '@/lib/errors';
+import { inlineTrackRecordSchema } from '@/lib/sources/inline/adapter';
+import { FACTOR_CATALOGUE } from './factors';
 
 /**
  * Regimen's MCP surface.
  *
- * Written against MCP revision 2026-07-28, which is stateless: there is no
- * `initialize` handshake and no session id. Anything that must persist between calls
- * is carried as an explicit, server-minted handle passed back as an ordinary tool
- * argument — the pattern the current spec prescribes in place of sessions.
+ * Written against MCP revision 2026-07-28, which is stateless: no `initialize`
+ * handshake, no session id. Anything that needs to persist between calls travels as
+ * an explicit server-minted handle passed back as an ordinary argument, which is the
+ * pattern the current spec prescribes in place of sessions.
  *
- * Conventions applied to every tool here, because they are what makes a tool usable
- * by a model rather than merely callable:
- *  - an `outputSchema`, so results arrive as validated `structuredContent` instead of
- *    a wall of text the client has to re-parse;
- *  - annotations declaring the tool read-only and closed-world, since nothing in this
- *    service writes, trades, or touches funds;
- *  - a description long enough to say what the tool is FOR and when not to use it;
- *  - failures returned as tool-execution errors, not protocol errors, so the model can
- *    read the reason and correct itself.
- *
- * The handler keeps the SDK's default legacy fallback on, so 2025-era clients that
- * still send `initialize` are answered from the same factory.
+ * Conventions applied to every tool, because they are what make a tool usable by a
+ * model rather than merely callable:
+ *  - an `outputSchema`, so results arrive as validated `structuredContent` rather
+ *    than a wall of text the client has to re-parse;
+ *  - annotations declaring each tool read-only — nothing here writes, trades, signs,
+ *    or holds funds, and a client should be able to see that without reading docs;
+ *  - descriptions that say what the tool is FOR and when to reach for a different one;
+ *  - a `detail` switch, because an agent usually wants the verdict and its reasons,
+ *    not sixty buckets it will never quote;
+ *  - failures returned as tool-execution errors carrying a machine-readable code, so
+ *    the model can correct itself instead of guessing.
  */
-
-/** Tool names: lowercase, underscore-separated, namespaced. Safe for every client. */
-export const TOOL_NAMES = [
-  'regimen_describe_factors',
-  'regimen_evaluate_track_record',
-  'regimen_regime_map',
-  'regimen_self_attack',
-  'regimen_today',
-  'regimen_stability_start',
-  'regimen_stability_poll',
-] as const;
 
 const READ_ONLY = {
   readOnlyHint: true,
@@ -43,8 +37,117 @@ const READ_ONLY = {
   openWorldHint: false,
 } as const;
 
-/** Tools that reach a third-party data service are open-world; results can change. */
-const READ_ONLY_OPEN_WORLD = { ...READ_ONLY, idempotentHint: false, openWorldHint: true } as const;
+/** Tools that reach the third-party data service: same safety, but results move. */
+const READ_ONLY_LIVE = { ...READ_ONLY, idempotentHint: false, openWorldHint: true } as const;
+
+export interface ServerDeps {
+  /** Nexus credentials for this request, if any were supplied or configured. */
+  readonly nexusApiKey: string | null;
+  readonly credentialSource: 'caller' | 'demo' | 'none';
+}
+
+const detailSchema = z
+  .enum(['concise', 'full'])
+  .default('concise')
+  .describe(
+    'concise returns the verdict, the headline statistics and the reasoning — enough to answer a user. full adds every bucket, every dropped point and the complete provenance list, and is much larger.',
+  );
+
+const selectorSchema = z
+  .object({
+    source: z
+      .enum(['olaxbt-nexus', 'inline'])
+      .describe(
+        'olaxbt-nexus analyses the strategy bound to this connection’s API key. inline analyses an equity curve you supply directly, from any venue or backtest.',
+      ),
+    symbol: z
+      .string()
+      .min(3)
+      .max(32)
+      .optional()
+      .describe('For olaxbt-nexus: the market the strategy trades, used for point-in-time reads. Default BTC/USDT.'),
+    trackRecord: inlineTrackRecordSchema.optional().describe('Required when source is inline.'),
+  })
+  .describe('Which track record to analyse.');
+
+function toSelector(input: z.infer<typeof selectorSchema>): SourceSelector {
+  if (input.source === 'inline') {
+    if (!input.trackRecord) {
+      throw new RegimenError('invalid_input', '`selector.trackRecord` is required when source is "inline".', {
+        remedy: 'Supply an equity curve, or set source to "olaxbt-nexus" to analyse the connected strategy.',
+      });
+    }
+    return { source: 'inline', trackRecord: input.trackRecord };
+  }
+  return { source: 'olaxbt-nexus', symbol: input.symbol ?? 'BTC/USDT' };
+}
+
+const evidenceOutputSchema = z.object({
+  label: z.string(),
+  sourceId: z.string(),
+  verdict: z.string().describe('One of insufficient_evidence, indistinguishable_from_luck, weak, supported, strong.'),
+  headline: z.string(),
+  usableReturns: z.number(),
+  sharpePerPeriod: z.number().nullable(),
+  sharpeAnnualised: z.number().nullable(),
+  probabilisticSharpe: z.number().nullable(),
+  minimumTrackRecordLength: z.number().nullable(),
+  periodsShortOfSignificance: z.number().nullable(),
+  sharpeConfidenceInterval: z.object({ lower: z.number(), upper: z.number(), level: z.number() }).nullable(),
+  deflatedSharpe: z.number().nullable(),
+  reasoning: z.array(z.string()),
+  divergencesFromReported: z.array(
+    z.object({ field: z.string(), reported: z.number(), recomputed: z.number(), material: z.boolean() }),
+  ),
+  notes: z.array(z.string()),
+  full: z.unknown().nullable().describe('The complete report when detail is "full", otherwise null.'),
+});
+
+const regimeOutputSchema = z.object({
+  label: z.string(),
+  datesCovered: z.number(),
+  minSample: z.number(),
+  factors: z.array(
+    z.object({
+      key: z.string(),
+      bucketingMethod: z.string(),
+      sufficientBuckets: z.number(),
+      best: z.object({ label: z.string(), sharpe: z.number() }).nullable(),
+      worst: z.object({ label: z.string(), sharpe: z.number() }).nullable(),
+      spread: z.number().nullable(),
+      permutationPValue: z.number().nullable(),
+      interpretation: z.string().nullable(),
+      warnings: z.array(z.string()),
+    }),
+  ),
+  warnings: z.array(z.string()),
+  full: z.unknown().nullable(),
+});
+
+const selfAttackOutputSchema = z.object({
+  label: z.string(),
+  verdict: z.string(),
+  controls: z.array(
+    z.object({
+      name: z.string(),
+      expected: z.string(),
+      observed: z.number().nullable(),
+      passed: z.boolean(),
+      detail: z.string(),
+    }),
+  ),
+  nullDistribution: z
+    .object({
+      simulations: z.number(),
+      observedPsr: z.number().nullable(),
+      nullMedianPsr: z.number().nullable(),
+      nullP95Psr: z.number().nullable(),
+      empiricalPValue: z.number().nullable(),
+      interpretation: z.string(),
+    })
+    .nullable(),
+  notes: z.array(z.string()),
+});
 
 const factorDescriptionSchema = z.object({
   factors: z.array(
@@ -57,86 +160,41 @@ const factorDescriptionSchema = z.object({
       pointInTime: z.boolean(),
     }),
   ),
-  coverage: z.object({
-    note: z.string(),
-  }),
+  note: z.string(),
 });
 
-const FACTOR_CATALOGUE: Record<
-  (typeof REGIME_FACTOR_KEYS)[number],
-  { label: string; unit: string; description: string; source: string }
-> = {
-  vix: {
-    label: 'VIX',
-    unit: 'index',
-    description: 'CBOE volatility index close. The standard proxy for how much fear is priced into equities.',
-    source: 'get_macro',
-  },
-  us10y: {
-    label: 'US 10-year yield',
-    unit: 'percent',
-    description: 'Ten-year Treasury yield. Moves in it reprice every risk asset, crypto included.',
-    source: 'get_macro',
-  },
-  fedFunds: {
-    label: 'Effective fed funds rate',
-    unit: 'percent',
-    description: 'The policy rate actually transacted. Separates tightening regimes from easing ones.',
-    source: 'get_macro',
-  },
-  fundingRate: {
-    label: 'Perpetual funding rate',
-    unit: 'fraction per interval',
-    description:
-      'What longs pay shorts on the perpetual. Persistently positive funding marks crowded long positioning.',
-    source: 'get_historical_funding',
-  },
-  openInterestUsd: {
-    label: 'Open interest',
-    unit: 'USD',
-    description: 'Notional open on the perpetual. Rising open interest into a move means leverage is building.',
-    source: 'get_open_interest',
-  },
-  longShortRatio: {
-    label: 'Long/short ratio',
-    unit: 'ratio',
-    description: 'Account positioning skew. Extremes mark one-sided books that unwind violently.',
-    source: 'get_open_interest',
-  },
-  fearGreed: {
-    label: 'Fear & Greed index',
-    unit: '0-100',
-    description: 'Composite retail sentiment gauge. Included because many strategies are implicitly sentiment bets.',
-    source: 'get_fear_greed',
-  },
-  trendTemplatePassed: {
-    label: 'Trend-template gates passed',
-    unit: 'count',
-    description:
-      'How many Minervini trend-template conditions held that day. A compact description of whether price was in an established uptrend.',
-    source: 'get_vcp',
-  },
-};
+function ok<T>(output: T) {
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(output, null, 2) }],
+    structuredContent: output as Record<string, unknown>,
+  };
+}
 
-/**
- * Build a server instance. Called once per request by the handler, which is what
- * keeps the deployment horizontally scalable with no shared state.
- */
-export function buildServer(): McpServer {
+/** Failures become tool-execution errors so the model can read them and retry correctly. */
+function fail(error: unknown) {
+  const normalised = toRegimenError(error);
+  return {
+    isError: true as const,
+    content: [{ type: 'text' as const, text: JSON.stringify(normalised.toJSON(), null, 2) }],
+  };
+}
+
+export function buildServer(deps: ServerDeps): McpServer {
   const server = new McpServer({ name: 'regimen', version: '1.0.0' });
+  const credentials = deps.nexusApiKey ? { apiKey: deps.nexusApiKey } : {};
 
   server.registerTool(
     'regimen_describe_factors',
     {
       title: 'Describe regime factors',
       description:
-        'List the market-condition factors Regimen slices performance by, with the units, the upstream operation each is read from, and whether it is point-in-time. Call this before regimen_regime_map when you need to know which factor keys exist, what a value means, or how to describe a bucket to a user. It takes no arguments, reaches no network, and never changes.',
+        'List the market-condition factors Regimen slices performance by, with units, the upstream operation each is read from, and how it is bucketed. Call this when you need to know which factor keys exist or how to explain a bucket to a user. Takes no arguments, reaches no network, never changes.',
       inputSchema: z.object({}),
       outputSchema: factorDescriptionSchema,
       annotations: { ...READ_ONLY, title: 'Describe regime factors' },
     },
-    () => {
-      const output = {
+    () =>
+      ok({
         factors: REGIME_FACTOR_KEYS.map((key) => ({
           key,
           label: FACTOR_CATALOGUE[key].label,
@@ -145,29 +203,184 @@ export function buildServer(): McpServer {
           source: FACTOR_CATALOGUE[key].source,
           pointInTime: true,
         })),
-        coverage: {
-          note: 'Every factor is read with an explicit as_of date, so a regime map contains only what was knowable on the day. Call regimen_regime_map for the dates actually covered by a given strategy.',
-        },
-      };
-      return {
-        content: [{ type: 'text' as const, text: JSON.stringify(output, null, 2) }],
-        structuredContent: output,
-      };
+        note: 'Every factor is read with an explicit as_of date, so a regime map contains only what was knowable on the day.',
+      }),
+  );
+
+  server.registerTool(
+    'regimen_evaluate_track_record',
+    {
+      title: 'Evaluate a track record',
+      description:
+        'Answer whether a trading strategy’s measured performance is distinguishable from luck. Returns the Probabilistic Sharpe Ratio (the probability the true Sharpe beats a benchmark, corrected for sample length, skew and fat tails), a bootstrap confidence interval, and the Minimum Track Record Length — how long the record would have to run before the claim could be made at all. Use this whenever someone quotes a Sharpe ratio, a win rate or a return and you need to know whether the number means anything. It will frequently say the evidence is too thin; that is the intended answer, not a failure.',
+      inputSchema: z.object({
+        selector: selectorSchema,
+        benchmarkSharpe: z
+          .number()
+          .finite()
+          .default(0)
+          .describe('Per-period Sharpe the record must beat. 0 asks only whether there is any edge at all.'),
+        confidence: z.number().gt(0.5).lt(1).default(0.95),
+        trialSharpes: z
+          .array(z.number().finite())
+          .max(500)
+          .optional()
+          .describe(
+            'Per-period Sharpe ratios of other configurations tried for this strategy. Supplying them enables the Deflated Sharpe Ratio, which discounts the headline for how many variants were tested before this one was reported.',
+          ),
+        detail: detailSchema,
+      }),
+      outputSchema: evidenceOutputSchema,
+      annotations: { ...READ_ONLY_LIVE, title: 'Evaluate a track record' },
+    },
+    async ({ selector, benchmarkSharpe, confidence, trialSharpes, detail }) => {
+      try {
+        const resolved = await resolveSource(toSelector(selector), credentials);
+        const report = analyseSignificance(resolved.record, {
+          benchmarkSharpe,
+          confidence,
+          ...(trialSharpes ? { trialSharpes } : {}),
+        });
+        return ok({
+          label: report.label,
+          sourceId: report.sourceId,
+          verdict: report.evidence.tier,
+          headline: report.evidence.headline,
+          usableReturns: report.sample.usableReturns,
+          sharpePerPeriod: report.performance.sharpePerPeriod,
+          sharpeAnnualised: report.performance.sharpeAnnualised,
+          probabilisticSharpe: report.evidence.probabilisticSharpe,
+          minimumTrackRecordLength: report.evidence.minimumTrackRecordLength,
+          periodsShortOfSignificance: report.evidence.periodsShortOfSignificance,
+          sharpeConfidenceInterval: report.evidence.sharpeConfidenceInterval,
+          deflatedSharpe: report.evidence.deflatedSharpe,
+          reasoning: [...report.evidence.rationale],
+          divergencesFromReported: report.divergences.map((row) => ({
+            field: row.field,
+            reported: row.reported,
+            recomputed: row.recomputed,
+            material: row.material,
+          })),
+          notes: [...report.notes],
+          full: detail === 'full' ? report : null,
+        });
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'regimen_regime_map',
+    {
+      title: 'Map performance to market regimes',
+      description:
+        'Break a strategy’s returns down by the market conditions that held on each date — volatility, funding, open interest, positioning, sentiment, trend state — and report performance per bucket. Each factor also gets a permutation test: the observed best-to-worst spread is compared against spreads produced by randomly reshuffling the regime labels, so a flattering subset cannot pass itself off as a regime effect. Use this after regimen_evaluate_track_record when you need to know WHERE an edge comes from, or whether it is a bet on conditions that could end.',
+      inputSchema: z.object({
+        selector: selectorSchema,
+        minSample: z
+          .number()
+          .int()
+          .min(5)
+          .max(500)
+          .default(15)
+          .describe('Buckets below this many observations are returned but flagged unusable.'),
+        maxDates: z
+          .number()
+          .int()
+          .min(5)
+          .max(45)
+          .default(45)
+          .describe('How many of the most recent dates to read conditions for, bounded by the upstream rate limit.'),
+        detail: detailSchema,
+      }),
+      outputSchema: regimeOutputSchema,
+      annotations: { ...READ_ONLY_LIVE, title: 'Map performance to market regimes' },
+    },
+    async ({ selector, minSample, maxDates, detail }) => {
+      try {
+        const resolvedSelector = toSelector(selector);
+        const resolved = await resolveSource(resolvedSelector, credentials);
+        let regimes = resolved.regimes;
+        if (!regimes) {
+          if (!resolved.fetchRegimesFor) {
+            return fail(
+              new Error(
+                'This source cannot look up market conditions. Supply them with the track record, or use source "olaxbt-nexus".',
+              ),
+            );
+          }
+          regimes = await resolved.fetchRegimesFor(datesOf(resolved.record).slice(-maxDates));
+        }
+        const report = buildRegimeMap(resolved.record, regimes, { minSample });
+        return ok({
+          label: report.label,
+          datesCovered: report.alignment.datesCovered,
+          minSample: report.minSample,
+          factors: report.factors.map((factor) => ({
+            key: factor.key,
+            bucketingMethod: factor.bucketingMethod,
+            sufficientBuckets: factor.sufficientBuckets,
+            best: factor.best,
+            worst: factor.worst,
+            spread: factor.spread,
+            permutationPValue: factor.permutation?.pValue ?? null,
+            interpretation: factor.permutation?.interpretation ?? null,
+            warnings: [...factor.warnings],
+          })),
+          warnings: [...report.warnings],
+          full: detail === 'full' ? report : null,
+        });
+      } catch (error) {
+        return fail(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'regimen_self_attack',
+    {
+      title: 'Attack the verdict',
+      description:
+        'Run Regimen’s own analysis against controls whose answer is known in advance: the strategy’s returns with the edge mathematically removed, and a simulated population of strategies with no edge at all. Returns whether the engine correctly found nothing in them, and where the real strategy’s confidence sits among pure-luck strategies of the same length and volatility. Use this when a user is entitled to ask why they should believe the verdict, or before quoting a result as evidence.',
+      inputSchema: z.object({
+        selector: selectorSchema,
+        simulations: z.number().int().min(100).max(10_000).default(1_000),
+      }),
+      outputSchema: selfAttackOutputSchema,
+      annotations: { ...READ_ONLY_LIVE, title: 'Attack the verdict' },
+    },
+    async ({ selector, simulations }) => {
+      try {
+        const resolved = await resolveSource(toSelector(selector), credentials);
+        const report = runSelfAttack(resolved.record, { simulations });
+        return ok({
+          label: report.label,
+          verdict: report.verdict,
+          controls: report.controls.map((control) => ({
+            name: control.name,
+            expected: control.expected,
+            observed: control.observed,
+            passed: control.passed,
+            detail: control.detail,
+          })),
+          nullDistribution: report.nullDistribution
+            ? {
+                simulations: report.nullDistribution.simulations,
+                observedPsr: report.nullDistribution.observedPsr,
+                nullMedianPsr: report.nullDistribution.nullMedianPsr,
+                nullP95Psr: report.nullDistribution.nullP95Psr,
+                empiricalPValue: report.nullDistribution.empiricalPValue,
+                interpretation: report.nullDistribution.interpretation,
+              }
+            : null,
+          notes: [...report.notes],
+        });
+      } catch (error) {
+        return fail(error);
+      }
     },
   );
 
   return server;
 }
-
-export const mcpHandler = createMcpHandler(() => buildServer());
-
-/** Shared error shaping so MCP tool failures read the same as REST failures. */
-export function toolError(error: unknown) {
-  const normalised = toRegimenError(error);
-  return {
-    isError: true as const,
-    content: [{ type: 'text' as const, text: JSON.stringify(normalised.toJSON(), null, 2) }],
-  };
-}
-
-export { READ_ONLY, READ_ONLY_OPEN_WORLD };

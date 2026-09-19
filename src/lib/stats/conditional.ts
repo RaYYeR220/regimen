@@ -437,7 +437,9 @@ export function compareBuckets(
     topContributor.share >= concentrationThreshold;
 
   return ok({
-    best: rankableEnough ? best : (rankable[0] ?? null),
+    // With a single rankable bucket `best` is that bucket but `worst` is not
+    // meaningful, so it is withheld along with the spreads.
+    best,
     worst: rankableEnough ? worst : null,
     sharpeSpread,
     meanSpread,

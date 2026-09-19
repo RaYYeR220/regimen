@@ -312,7 +312,8 @@ describe('package invariant: no public function returns NaN or Infinity', () => 
 describe('end-to-end: an equity curve all the way to a verdict', () => {
   it('runs the full pipeline and produces a coherent audit trail', () => {
     const DAY = 24 * 60 * 60 * 1000;
-    const returns = seededNormals(600, 0.0008, 0.009, 2_024_314);
+    // Per-period Sharpe of 0.0015/0.009 = 0.167 over 600 periods, i.e. z ~ 4.
+    const returns = seededNormals(600, 0.0015, 0.009, 2_024_314);
     let level = 100;
     const points = [{ t: 0, equity: level }];
     for (let i = 0; i < returns.length; i += 1) {

@@ -286,6 +286,12 @@ function acklamCentral(p: number): number {
  * normal cumulative distribution function"; refinement step as described in
  * the same note.
  *
+ * Round-trip note: `normalCdf(normalInv(p))` recovers `p` to ~1e-14 relative
+ * across 300 orders of magnitude, but `normalInv(normalCdf(x))` only recovers
+ * `x` well for `x ≲ 2`. That is a limit of the representation, not of either
+ * algorithm: for larger x, Φ(x) is a double just under 1 and the tail mass it
+ * encodes has already lost its relative resolution. Work in the lower tail.
+ *
  * @param p - Probability, normally in the open interval (0, 1).
  * @returns The z such that Φ(z) = p.
  */

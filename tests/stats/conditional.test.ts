@@ -116,10 +116,11 @@ describe('conditionalStats', () => {
   });
 
   it('FINDS A PLANTED EDGE: the bucket carrying the alpha ranks best', () => {
-    // 400 periods. Regime value drives the label; the "storm" regime is given a
-    // +0.30% per-period mean on top of the same volatility, everything else is
-    // drawn from the same zero-mean distribution.
-    const n = 400;
+    // 600 periods. The regime value drives the label; the "storm" regime is
+    // given a +0.6% per-period mean on top of the same 1% volatility (a true
+    // per-period Sharpe of 0.6 against 0), everything else is drawn from the
+    // same zero-mean distribution.
+    const n = 600;
     const noise = seededNormals(n, 0, 0.01, 90_210);
     const regime = seededNormals(n, 0, 1, 555);
     const returns: number[] = [];
@@ -127,7 +128,7 @@ describe('conditionalStats', () => {
     for (let i = 0; i < n; i += 1) {
       const isStorm = (regime[i] ?? 0) > 0;
       labels.push(isStorm ? 'storm' : 'calm');
-      returns.push((noise[i] ?? 0) + (isStorm ? 0.003 : 0));
+      returns.push((noise[i] ?? 0) + (isStorm ? 0.006 : 0));
     }
 
     const stats = unwrap(conditionalStats({ returns, labels, minSample: 20 }));
@@ -144,7 +145,9 @@ describe('conditionalStats', () => {
     const comparison = unwrap(compareBuckets(stats.buckets));
     expect(comparison.best?.label).toBe('storm');
     expect(comparison.worst?.label).toBe('calm');
-    expect(comparison.sharpeSpread ?? 0).toBeGreaterThan(0.2);
+    // True spread is 0.6; the sampling error on each bucket's Sharpe is about
+    // 1/sqrt(300) = 0.06, so 0.35 is a comfortable floor rather than a fitted one.
+    expect(comparison.sharpeSpread ?? 0).toBeGreaterThan(0.35);
   });
 
   it('KEEPS THIN BUCKETS, flagged insufficient, instead of hiding them', () => {
@@ -280,20 +283,27 @@ describe('conditionalStats', () => {
 });
 
 describe('compareBuckets', () => {
+  /**
+   * Fixture builder. Uses an explicit `undefined` check rather than `??` so a
+   * deliberate `null` override (an undefined Sharpe, say) is not silently
+   * replaced by the default.
+   */
   function bucket(overrides: Partial<BucketStats> & { label: string }): BucketStats {
+    const pick = <K extends keyof BucketStats>(key: K, fallback: BucketStats[K]): BucketStats[K] =>
+      overrides[key] === undefined ? fallback : (overrides[key] as BucketStats[K]);
     return {
       label: overrides.label,
-      count: overrides.count ?? 100,
-      mean: overrides.mean ?? 0.001,
-      stdDev: overrides.stdDev ?? 0.01,
-      sharpe: overrides.sharpe ?? 0.1,
-      sharpeReason: overrides.sharpeReason ?? null,
-      wins: overrides.wins ?? 55,
-      winRate: overrides.winRate ?? 0.55,
-      winRateInterval: overrides.winRateInterval ?? { lower: 0.45, upper: 0.65 },
-      totalReturn: overrides.totalReturn ?? 0.1,
-      sumReturns: overrides.sumReturns ?? 0.1,
-      sufficient: overrides.sufficient ?? true,
+      count: pick('count', 100),
+      mean: pick('mean', 0.001),
+      stdDev: pick('stdDev', 0.01),
+      sharpe: pick('sharpe', 0.1),
+      sharpeReason: pick('sharpeReason', null),
+      wins: pick('wins', 55),
+      winRate: pick('winRate', 0.55),
+      winRateInterval: pick('winRateInterval', { lower: 0.45, upper: 0.65 }),
+      totalReturn: pick('totalReturn', 0.1),
+      sumReturns: pick('sumReturns', 0.1),
+      sufficient: pick('sufficient', true),
     };
   }
 
