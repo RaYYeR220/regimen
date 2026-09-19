@@ -41,6 +41,9 @@ const READ_ONLY = {
 /** Tools that reach the third-party data service: same safety, but results move. */
 const READ_ONLY_LIVE = { ...READ_ONLY, idempotentHint: false, openWorldHint: true } as const;
 
+/** Inventories are fixed per deployment; an hour is a safe public lifetime. */
+const LIST_CACHE_HINT = { ttlMs: 3_600_000, cacheScope: 'public' } as const;
+
 export interface ServerDeps {
   /** Nexus credentials for this request, if any were supplied or configured. */
   readonly nexusApiKey: string | null;
@@ -181,7 +184,25 @@ function fail(error: unknown) {
 }
 
 export function buildServer(deps: ServerDeps): McpServer {
-  const server = new McpServer({ name: 'regimen', version: '1.0.0' });
+  const server = new McpServer(
+    { name: 'regimen', version: '1.0.0' },
+    {
+      // The tool, prompt and resource inventories are fixed at build time and are
+      // identical for every caller, so they are publicly cacheable. Under the
+      // 2026-07-28 revision these hints are the only thing that stops a client
+      // refetching the whole catalogue on every turn; the conservative default of
+      // `ttlMs: 0, cacheScope: 'private'` would be a lie about data that never moves.
+      cacheHints: {
+        'tools/list': LIST_CACHE_HINT,
+        'prompts/list': LIST_CACHE_HINT,
+        'resources/list': LIST_CACHE_HINT,
+        'resources/templates/list': LIST_CACHE_HINT,
+        'server/discover': LIST_CACHE_HINT,
+      },
+      instructions:
+        'Regimen decides whether a trading track record is distinguishable from luck, and which market regimes its edge lives in. Start with regimen_evaluate_track_record; read regimen://methodology before explaining any number to a user. A verdict of insufficient_evidence or indistinguishable_from_luck is a real answer, not an error — report it as such rather than retrying with different parameters. This service is read-only: it does not trade, hold funds, sign, or perform any security or compliance analysis.',
+    },
+  );
   const credentials = deps.nexusApiKey ? { apiKey: deps.nexusApiKey } : {};
 
   server.registerTool(
